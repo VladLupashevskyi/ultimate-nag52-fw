@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <stdint.h>
+#include "adapt_maps.h"
 #include "canbus/can_defines.h"
 #include "canbus/can_hal.h"
 #include "common_structs.h"
@@ -147,8 +148,7 @@ class TorqueConverter {
 
         bool init_tables_ok = false;
 
-
-
+        int16_t ms3h_default_map[TCC_ADAPT_MAP_Z_SIZE] = {};
         StoredMap* tcc_adapt_map_d1 = nullptr;
         StoredMap* tcc_adapt_map_d2 = nullptr;
         StoredMap* tcc_adapt_map_d3 = nullptr;

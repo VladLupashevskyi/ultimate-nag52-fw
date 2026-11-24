@@ -34,6 +34,11 @@ const uint16_t SLIP_Z_COAST[5] = {  70,   40,   40,   10,   10};
 const uint16_t TCC_P_ADDER_X[5] = {600, 750,  990, 1500, 6000};
 const uint16_t TCC_P_ADDER_Z[5] = {  0,  50,  100,  200,  200};
 
+// A034 ms3h test defaults. Subtract the zero-torque pressure and scale by five.
+const bool TCC_USE_MS3H_TEST_SEED = true;
+const uint16_t TCC_MS3H_TORQUE_NM[7] = {10,  40,   80,  130,  200,  310,  550};
+const uint16_t TCC_MS3H_PRESSURE[7] =  { 0, 750, 1550, 2400, 4050, 6000, 9250};
+
 const int16_t TCC_PID_X[5] = {-20, 0, 100, 250, 500};
 const int16_t TCC_PID_PZ_PULL[5] = {20, 10, 0, 0, 0};
 const int16_t TCC_PID_IZ_PULL[5] = {300, 200, 100, 30, 3};
@@ -48,37 +53,48 @@ TorqueConverter::TorqueConverter(uint16_t max_gb_rating)  {
         this->rated_max_torque = TCC_CURRENT_SETTINGS.tcc_max_trq_override;
     }
 
-    this->tcc_adapt_map_d1 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_1, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, TCC_ADAPT_MAP_Z);
+    const int16_t* default_adapt_map = TCC_ADAPT_MAP_Z;
+    if (TCC_USE_MS3H_TEST_SEED) {
+        // The ms3h pressure increment above zero torque is identical in each temperature row.
+        for (uint8_t x = 0; x < 6; ++x) {
+            const uint16_t torque_nm = this->rated_max_torque * TCC_ADAPT_MAP_X[x] / 100;
+            const int16_t pressure = interpolate_linear_array(torque_nm, 7, TCC_MS3H_TORQUE_NM, TCC_MS3H_PRESSURE);
+            for (uint8_t y = 0; y < 6; ++y) {
+                this->ms3h_default_map[y * 6 + x] = pressure;
+            }
+        }
+        default_adapt_map = this->ms3h_default_map;
+    }
+
+    this->tcc_adapt_map_d1 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_1, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, default_adapt_map);
     if (this->tcc_adapt_map_d1->init_status() != ESP_OK) {
         delete this->tcc_adapt_map_d1;
         this->tcc_adapt_map_d1 = nullptr;
     }
 
-    this->tcc_adapt_map_d2 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_2, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, TCC_ADAPT_MAP_Z);
+    this->tcc_adapt_map_d2 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_2, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, default_adapt_map);
     if (this->tcc_adapt_map_d2->init_status() != ESP_OK) {
         delete this->tcc_adapt_map_d2;
         this->tcc_adapt_map_d2 = nullptr;
     }
 
-    this->tcc_adapt_map_d3 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_3, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, TCC_ADAPT_MAP_Z);
+    this->tcc_adapt_map_d3 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_3, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, default_adapt_map);
     if (this->tcc_adapt_map_d3->init_status() != ESP_OK) {
         delete this->tcc_adapt_map_d3;
         this->tcc_adapt_map_d3 = nullptr;
     }
 
-    this->tcc_adapt_map_d4 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_4, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, TCC_ADAPT_MAP_Z);
+    this->tcc_adapt_map_d4 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_4, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, default_adapt_map);
     if (this->tcc_adapt_map_d4->init_status() != ESP_OK) {
         delete this->tcc_adapt_map_d4;
         this->tcc_adapt_map_d4 = nullptr;
     }
 
-    this->tcc_adapt_map_d5 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_5, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, TCC_ADAPT_MAP_Z);
+    this->tcc_adapt_map_d5 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_5, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, default_adapt_map);
     if (this->tcc_adapt_map_d5->init_status() != ESP_OK) {
         delete this->tcc_adapt_map_d5;
         this->tcc_adapt_map_d5 = nullptr;
     }
-
-
 
     this->slip_rpm_target_map = new StoredMap(NVS_KEY_TCC_SLIP_TARGET_MAP, TCC_RPM_TARGET_MAP_SIZE, rpm_map_x_headers, rpm_map_y_headers, 11, 8, TCC_RPM_TARGET_MAP);
     if (this->slip_rpm_target_map->init_status() != ESP_OK) {
