@@ -120,7 +120,7 @@ void TorqueConverter::fill_tcc(GearboxGear g, SensorData* sd) {
             this->timer_command_p = TCC_CURRENT_SETTINGS.prefill_cycles/2;
         }
     } else if (2 == this->command_p_stage) {
-        this->tcc_shift_pressure = linear_ramp_with_timer(TCC_CURRENT_SETTINGS.prefill_pressure, end, this->timer_command_p) + this->min_tcc_pressure;
+        this->tcc_shift_pressure = linear_ramp_with_timer(this->tcc_shift_pressure, end + this->min_tcc_pressure, this->timer_command_p);
         if (0 == this->timer_command_p) {
             this->command_p_stage = 3;
             this->timer_command_p = 10;
