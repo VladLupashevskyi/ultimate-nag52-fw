@@ -446,27 +446,29 @@ void TorqueConverter::process_open_or_slip_state(SensorData* sd, GearboxGear cur
                         }
                         y_idx = i;
                     }
-                    int old_v = map->get_value(engine_load_percent, sd->atf_temp);
+                    int previous_map_pressure = map->get_value(engine_load_percent, sd->atf_temp);
                     map->add_value(new_value, engine_load_percent, sd->atf_temp, 10.0);
-                    // Update PID I value
-                    this->pid_i_val -= (new_value - old_v);
-                    if (new_value > old_v) {
+                    if (new_value > previous_map_pressure) {
                         // Increase upper cells
                         for (int x = x_idx; x < 6; x++) {
                             for (int y = y_idx; y < 6; y++) {
-                                old_v = map->get_value(TCC_ADAPT_MAP_X[x], TCC_ADAPT_MAP_Y[y]);
-                                map->add_value(MAX(new_value, old_v), TCC_ADAPT_MAP_X[x], TCC_ADAPT_MAP_Y[y], 10.0);
+                                const int adapt_pressure = map->get_value(TCC_ADAPT_MAP_X[x], TCC_ADAPT_MAP_Y[y]);
+                                map->add_value(MAX(new_value, adapt_pressure), TCC_ADAPT_MAP_X[x], TCC_ADAPT_MAP_Y[y], 10.0);
                             }
                         }
-                    } else if (new_value < old_v) {
+                    } else if (new_value < previous_map_pressure) {
                         // Decrease lower cells
                         for (int x = 0; x < x_idx; x++) {
                             for (int y = 0; y < y_idx; y++) {
-                                old_v = map->get_value(TCC_ADAPT_MAP_X[x], TCC_ADAPT_MAP_Y[y]);
-                                map->add_value(MIN(new_value, old_v), TCC_ADAPT_MAP_X[x], TCC_ADAPT_MAP_Y[y], 10.0);
+                                const int adapt_pressure = map->get_value(TCC_ADAPT_MAP_X[x], TCC_ADAPT_MAP_Y[y]);
+                                map->add_value(MIN(new_value, adapt_pressure), TCC_ADAPT_MAP_X[x], TCC_ADAPT_MAP_Y[y], 10.0);
                             }
                         }
-
+                    }
+                    const int updated_map_pressure = map->get_value(engine_load_percent, sd->atf_temp);
+                    const int map_pressure_change = updated_map_pressure - previous_map_pressure;
+                    if (map_pressure_change != 0) {
+                        this->pid_i_val = (this->pid_i_val / 10 - map_pressure_change) * 10;
                     }
                 }
                 this->timer_till_adapt = 25; // 500ms till the next write is allowed
