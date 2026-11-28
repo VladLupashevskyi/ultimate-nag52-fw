@@ -7,6 +7,7 @@
 #include "canbus/can_defines.h"
 #include "canbus/can_hal.h"
 #include "common_structs.h"
+#include "diag/tcc_analysis.h"
 #include "nvs/eeprom_config.h"
 #include "esp_log.h"
 #include <string.h>
@@ -71,6 +72,7 @@ class TorqueConverter {
 
         uint8_t get_adapt_timer();
         uint8_t get_pid_timer();
+        void fill_analysis_snapshot(TccAnalysisSnapshot& snapshot) const;
         
         uint16_t get_slip_targ() {
             return this->slip_target;
@@ -138,6 +140,10 @@ class TorqueConverter {
         int tcc_commanded_pressure = 0;
         int tcc_shift_pressure = 0;
         int observed_fill_time = 0;
+        TccFillStage fill_stage = TccFillStage::Inactive;
+        uint8_t fill_stage_ticks = 0;
+        TccFillExitReason fill_exit_reason = TccFillExitReason::None;
+        void record_fill_exit(TccFillExitReason reason);
 
         uint32_t prefill_start_time = 0;
         InternalTccState current_tcc_state = InternalTccState::Open;
@@ -149,6 +155,7 @@ class TorqueConverter {
         bool init_tables_ok = false;
 
         int16_t ms3h_default_map[TCC_ADAPT_MAP_Z_SIZE] = {};
+        int16_t ms3h_default_map_d1[TCC_ADAPT_MAP_Z_SIZE] = {};
         StoredMap* tcc_adapt_map_d1 = nullptr;
         StoredMap* tcc_adapt_map_d2 = nullptr;
         StoredMap* tcc_adapt_map_d3 = nullptr;

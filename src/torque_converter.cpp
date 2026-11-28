@@ -33,11 +33,15 @@ const uint16_t SLIP_Z_COAST[5] = {  70,   40,   40,   10,   10};
 
 const uint16_t TCC_P_ADDER_X[5] = {600, 750,  990, 1500, 6000};
 const uint16_t TCC_P_ADDER_Z[5] = {  0,  50,  100,  200,  200};
+const uint16_t TCC_P_ADDER_FIRST_GEAR = 150;
 
-// A034 ms3h test defaults. Subtract the zero-torque pressure and scale by five.
+// A034 ms3h nominal pressure on Ultimate's PWM lookup scale (5x BA0P).
 const bool TCC_USE_MS3H_TEST_SEED = true;
+const uint16_t TCC_MS3H_SEED_REFERENCE_RPM = 1500;
+const int16_t TCC_MS3H_SEED_TEMP_C[4] = {20, 40, 70, 115};
+const int16_t TCC_MS3H_SEED_BASE_PRESSURE[4] = {800, 1100, 1400, 1700};
 const uint16_t TCC_MS3H_TORQUE_NM[7] = {10,  40,   80,  130,  200,  310,  550};
-const uint16_t TCC_MS3H_PRESSURE[7] =  { 0, 750, 1550, 2400, 4050, 6000, 9250};
+const uint16_t TCC_MS3H_PRESSURE_INCREASE[7] = {0, 750, 1550, 2400, 4050, 6000, 9250};
 
 const int16_t TCC_PID_X[5] = {-20, 0, 100, 250, 500};
 const int16_t TCC_PID_PZ_PULL[5] = {20, 10, 0, 0, 0};
@@ -54,19 +58,25 @@ TorqueConverter::TorqueConverter(uint16_t max_gb_rating)  {
     }
 
     const int16_t* default_adapt_map = TCC_ADAPT_MAP_Z;
+    const int16_t* default_adapt_map_d1 = TCC_ADAPT_MAP_Z;
     if (TCC_USE_MS3H_TEST_SEED) {
-        // The ms3h pressure increment above zero torque is identical in each temperature row.
-        for (uint8_t x = 0; x < 6; ++x) {
-            const uint16_t torque_nm = this->rated_max_torque * TCC_ADAPT_MAP_X[x] / 100;
-            const int16_t pressure = interpolate_linear_array(torque_nm, 7, TCC_MS3H_TORQUE_NM, TCC_MS3H_PRESSURE);
-            for (uint8_t y = 0; y < 6; ++y) {
-                this->ms3h_default_map[y * 6 + x] = pressure;
+        // Leave room for the pressure adder already applied at the reference turbine speed.
+        const int16_t reference_adder = interpolate_linear_array(TCC_MS3H_SEED_REFERENCE_RPM, 5, TCC_P_ADDER_X, TCC_P_ADDER_Z);
+        for (uint8_t y = 0; y < 6; ++y) {
+            const int16_t base_pressure = interpolate_linear_array(TCC_ADAPT_MAP_Y[y], 4, TCC_MS3H_SEED_TEMP_C, TCC_MS3H_SEED_BASE_PRESSURE);
+            for (uint8_t x = 0; x < 6; ++x) {
+                const uint16_t torque_nm = this->rated_max_torque * TCC_ADAPT_MAP_X[x] / 100;
+                const int16_t pressure_increase = interpolate_linear_array(torque_nm, 7, TCC_MS3H_TORQUE_NM, TCC_MS3H_PRESSURE_INCREASE);
+                const int16_t map_pressure = base_pressure + pressure_increase - reference_adder;
+                this->ms3h_default_map[y * 6 + x] = map_pressure;
+                this->ms3h_default_map_d1[y * 6 + x] = map_pressure - TCC_P_ADDER_FIRST_GEAR;
             }
         }
         default_adapt_map = this->ms3h_default_map;
+        default_adapt_map_d1 = this->ms3h_default_map_d1;
     }
 
-    this->tcc_adapt_map_d1 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_1, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, default_adapt_map);
+    this->tcc_adapt_map_d1 = new StoredMap(NVS_KEY_TCC_ADAPT_MAP_1, TCC_ADAPT_MAP_Z_SIZE, TCC_ADAPT_MAP_X, TCC_ADAPT_MAP_Y, 6, 6, default_adapt_map_d1);
     if (this->tcc_adapt_map_d1->init_status() != ESP_OK) {
         delete this->tcc_adapt_map_d1;
         this->tcc_adapt_map_d1 = nullptr;
@@ -119,6 +129,35 @@ void TorqueConverter::diag_toggle_tcc_sol(bool en) {
     this->tcc_solenoid_enabled = en;
 }
 
+void TorqueConverter::record_fill_exit(TccFillExitReason reason) {
+    if (this->fill_exit_reason == TccFillExitReason::None) {
+        this->fill_exit_reason = reason;
+    }
+}
+
+void TorqueConverter::fill_analysis_snapshot(TccAnalysisSnapshot& snapshot) const {
+    snapshot.fill_exit_reason = this->fill_exit_reason;
+    if (!snapshot.controller_updated) {
+        if (snapshot.fill_exit_reason == TccFillExitReason::None &&
+            this->fill_stage >= TccFillStage::Pulse && this->fill_stage <= TccFillStage::Hold) {
+            snapshot.fill_exit_reason = TccFillExitReason::ControlUnavailable;
+        }
+        return;
+    }
+    snapshot.slip_rpm = this->actual_slip_abs;
+    snapshot.slip_target_rpm = this->slip_target;
+    snapshot.map_pressure_mbar = this->map_pressure;
+    snapshot.pi_pressure_mbar = this->pid_pressure;
+    snapshot.load_percent = this->engine_load_percent;
+    snapshot.estimated_clutch_torque_nm = this->clutch_torque;
+    snapshot.current_state = static_cast<uint8_t>(this->current_tcc_state);
+    snapshot.target_state = static_cast<uint8_t>(this->target_tcc_state);
+    snapshot.adaptation_holdoff_ticks = this->timer_till_adapt;
+    snapshot.pi_holdoff_ticks = this->timer_till_pid;
+    snapshot.fill_stage = this->fill_stage;
+    snapshot.fill_timer_ticks = this->fill_stage_ticks;
+}
+
 void TorqueConverter::fill_tcc(GearboxGear g, SensorData* sd) {
     this->map_pressure = this->get_tcc_adapt_map_pressure(g, sd);
     int end = MAX(this->map_pressure, 0);
@@ -128,6 +167,12 @@ void TorqueConverter::fill_tcc(GearboxGear g, SensorData* sd) {
         this->timer_command_p = TCC_CURRENT_SETTINGS.prefill_cycles/2;
         this->command_p_stage = 1;
         this->observed_fill_time = 0;
+        this->fill_exit_reason = TccFillExitReason::None;
+    }
+    if (this->command_p_stage <= 3) {
+        // Report the phase producing pressure on this update, before it advances.
+        this->fill_stage = static_cast<TccFillStage>(this->command_p_stage);
+        this->fill_stage_ticks = this->timer_command_p;
     }
     if (1 == this->command_p_stage) {
         this->tcc_shift_pressure = TCC_CURRENT_SETTINGS.prefill_pressure + this->min_tcc_pressure;
@@ -145,6 +190,7 @@ void TorqueConverter::fill_tcc(GearboxGear g, SensorData* sd) {
         this->tcc_shift_pressure = end + this->min_tcc_pressure;
         if (0 == this->timer_command_p) {
             this->command_p_stage = 4;
+            this->record_fill_exit(TccFillExitReason::HoldElapsed);
             ESP_LOGI("TCC", "Fill end without application");
         }
     } else {
@@ -161,6 +207,7 @@ void TorqueConverter::fill_tcc(GearboxGear g, SensorData* sd) {
     if (this->clutch_torque > VEHICLE_CONFIG.engine_drag_torque/8.0) { // 1.2x drag torque = slip
       ESP_LOGI("TCC", "Fill completed after %d cycles", this->observed_fill_time);
       this->command_p_stage = 4;
+      this->record_fill_exit(TccFillExitReason::TorqueDetected);
     }
 
 }
@@ -194,7 +241,7 @@ void TorqueConverter::calculate_min_pressure(SensorData* sensors, GearboxGear cu
     int min = 0;
     min = (int)interpolate_linear_array(sensors->input_rpm, 5, TCC_P_ADDER_X, TCC_P_ADDER_Z);
     if (GearboxGear::First == current_g) {
-        min += 150;
+        min += TCC_P_ADDER_FIRST_GEAR;
     }
     this->min_tcc_pressure = min;
 }
@@ -326,6 +373,13 @@ void TorqueConverter::process_open_or_slip_state(SensorData* sd, GearboxGear cur
     } else if (this->current_tcc_state == InternalTccState::Open && this->target_tcc_state == InternalTccState::Slipping) {
         // Open -> Slipping
         if (slip_target > SLIP_V_WHEN_OPEN*1.1 || should_open || is_shifting) {
+            if (is_shifting) {
+                this->record_fill_exit(TccFillExitReason::ShiftStarted);
+            } else if (should_open) {
+                this->record_fill_exit(TccFillExitReason::OpenCondition);
+            } else {
+                this->record_fill_exit(TccFillExitReason::SlipTarget);
+            }
             this->target_tcc_state = InternalTccState::Open;
             this->timer_block_slipping = 10;
         } else {
@@ -415,6 +469,8 @@ void TorqueConverter::process_open_or_slip_state(SensorData* sd, GearboxGear cur
 
             int p = (this->pid_p_weight * slip_delta) / 1000;
             if (fill_handoff) {
+                this->fill_stage = TccFillStage::Handoff;
+                this->fill_stage_ticks = this->timer_fill_handoff;
                 // Match the last fill command first, then approach the normal base pressure.
                 const int base_pressure = this->min_tcc_pressure + this->map_pressure;
                 int handoff_pressure = previous_pressure;
@@ -509,6 +565,8 @@ void TorqueConverter::set_shift_prefill_adapting(bool adapting) {
 }
 
 void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors) {
+    this->fill_stage = TccFillStage::Inactive;
+    this->fill_stage_ticks = 0;
     // Timers
     if (this->timer_inc_slip > 0) {
         this->timer_inc_slip -= 1;
@@ -543,6 +601,9 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
         !init_tables_ok || // Some data was not initialized or invalid
         sol_tcc->is_disabled() // ISR of the TCC solenoid is disabled
     ) {
+        if (this->current_tcc_state == InternalTccState::Open && this->target_tcc_state == InternalTccState::Slipping) {
+            this->record_fill_exit(TccFillExitReason::ControlUnavailable);
+        }
         this->tcc_commanded_pressure = 0;
         this->pid_pressure = 0;
         this->map_pressure = 0;

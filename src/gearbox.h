@@ -35,6 +35,7 @@ public:
     explicit Gearbox(Shifter* shifter);
     // Diag test
     ClutchSpeeds diag_get_clutch_speeds() const;
+    TccAnalysisSnapshot diag_get_tcc_analysis_snapshot();
     void set_profile(AbstractProfile* prof);
     esp_err_t start_controller(void);
     void inc_gear_request(void);
@@ -76,6 +77,9 @@ private:
 
     AbstractProfile* current_profile = nullptr;
     portMUX_TYPE profile_mutex;
+    portMUX_TYPE tcc_analysis_mutex = portMUX_INITIALIZER_UNLOCKED;
+    TccAnalysisSnapshot tcc_analysis_snapshot;
+    void publish_tcc_analysis(const SensorData& inputs, uint8_t pedal, uint8_t gears, bool tcc_updated);
     GearboxGear target_gear = GearboxGear::Park;
     GearboxGear actual_gear = GearboxGear::Park;
     GearboxGear last_fwd_gear = GearboxGear::Second;

@@ -1031,6 +1031,38 @@ cleanup:
     vTaskDelete(nullptr);
 }
 
+TccAnalysisSnapshot Gearbox::diag_get_tcc_analysis_snapshot() {
+    portENTER_CRITICAL(&this->tcc_analysis_mutex);
+    const TccAnalysisSnapshot snapshot = this->tcc_analysis_snapshot;
+    portEXIT_CRITICAL(&this->tcc_analysis_mutex);
+    return snapshot;
+}
+
+void Gearbox::publish_tcc_analysis(const SensorData& inputs, uint8_t pedal, uint8_t gears, bool tcc_updated) {
+    TccAnalysisSnapshot snapshot;
+    snapshot.tcu_time_ms = GET_CLOCK_TIME();
+    snapshot.commanded_pressure_mbar = this->pressure_mgr->get_targ_tcc_pressure();
+    snapshot.pwm_raw = sol_tcc->get_pwm_compensated();
+    snapshot.coil_current_ma = sol_tcc->get_current(); // Latest independent current sample.
+    snapshot.engine_rpm = inputs.engine_rpm;
+    snapshot.turbine_rpm = inputs.input_rpm;
+    snapshot.output_rpm = inputs.output_rpm;
+    snapshot.engine_torque_nm = inputs.converted_torque;
+    snapshot.input_torque_nm = inputs.input_torque;
+    snapshot.driver_torque_nm = inputs.converted_driver_torque;
+    snapshot.atf_temperature_c = inputs.atf_temp;
+    snapshot.pedal_rate_pct_per_second = inputs.pedal_delta_per_second;
+    snapshot.pedal_raw = pedal;
+    snapshot.target_actual_gear = gears;
+    snapshot.controller_updated = tcc_updated;
+    if (this->tcc != nullptr) {
+        this->tcc->fill_analysis_snapshot(snapshot);
+    }
+    portENTER_CRITICAL(&this->tcc_analysis_mutex);
+    this->tcc_analysis_snapshot = snapshot;
+    portEXIT_CRITICAL(&this->tcc_analysis_mutex);
+}
+
 void Gearbox::controller_loop()
 {
     ShifterPosition last_position = ShifterPosition::SignalNotAvailable;
@@ -1213,6 +1245,10 @@ void Gearbox::controller_loop()
             }
         }
         uint8_t p_tmp = egs_can_hal->get_pedal_value(1000);
+        const uint8_t tcc_analysis_pedal = p_tmp;
+        SensorData tcc_analysis_inputs;
+        uint8_t tcc_analysis_gears = 0;
+        bool tcc_updated = false;
         if (p_tmp == 0xFF)
         {
             p_tmp = 250 / 4; // 25% as a fallback
@@ -1513,6 +1549,9 @@ void Gearbox::controller_loop()
                 {
                     if (this->tcc != nullptr)
                     {
+                        tcc_analysis_inputs = this->sensor_data;
+                        tcc_analysis_gears = this->get_targ_curr_gear();
+                        tcc_updated = true;
                         this->tcc->update(this->actual_gear, this->target_gear, this->pressure_mgr, this->current_profile, &this->sensor_data);
                         egs_can_hal->set_clutch_status(this->tcc->get_clutch_state());
                     }
@@ -1639,6 +1678,12 @@ void Gearbox::controller_loop()
         if (!shifting) {
             pressure_mgr->update_pressures(this->actual_gear, GearChange::_IDLE);
         }
+        this->publish_tcc_analysis(
+            tcc_updated ? tcc_analysis_inputs : this->sensor_data,
+            tcc_analysis_pedal,
+            tcc_updated ? tcc_analysis_gears : this->get_targ_curr_gear(),
+            tcc_updated
+        );
         if (
             ratio_from_c_gear != 0 && // Valid ratio
             sensor_data.engine_rpm != 0 // Engine is turning
